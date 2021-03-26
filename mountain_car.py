@@ -69,7 +69,7 @@ class Agent:
         x = layers.Dense(128, activation='relu')(inputs)
         x = layers.Dense(64, activation='relu')(x)
         x = layers.Dense(32, activation='relu')(x)
-        outputs = layers.Dense(self.action_space, activation='softmax')(x)
+        outputs = layers.Dense(self.action_space)(x)
         return Model(inputs, outputs)
 
     def fit(self, epochs=1):
