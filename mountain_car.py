@@ -13,7 +13,7 @@ class ExperienceReplay:
     #this class is for storing information like current state, next state, action and reward
     #this info will help us in training our neural network
     #the advantage of this is that will make our neural network have better convergence
-    def __init__(self, batch_size=1024, max_size=4096):
+    def __init__(self, batch_size=2048, max_size=4096):
         assert batch_size <= max_size
         self.max_size = max_size
         #our buffer will be double ended queue because we don't need to worry about the max size.
@@ -41,12 +41,12 @@ class ExperienceReplay:
         'converts every column into tf.tensor and return a tuple of columns'
         current_states = tf.convert_to_tensor([x[0] for x in batch], dtype=tf.float32) 
         next_states = tf.convert_to_tensor([x[1] for x in batch], dtype=tf.float32)
-        action_probs = tf.convert_to_tensor([x[2] for x in batch], dtype=tf.float32)
+        action_values = tf.convert_to_tensor([x[2] for x in batch], dtype=tf.float32)
         actions = tf.convert_to_tensor([x[3] for x in batch], dtype=tf.float32)
         rewards = tf.convert_to_tensor([x[4] for x in batch], dtype=tf.float32)
         done = tf.convert_to_tensor([x[5] for x in batch], dtype=tf.float32)
         
-        return current_states, next_states, action_probs, actions, rewards, done
+        return current_states, next_states, action_values, actions, rewards, done
 
 
 class Agent:
@@ -57,7 +57,7 @@ class Agent:
         self.target_network = self.create_network()
         self.target_network.set_weights(self.network.get_weights())
         self.target_network.trainable = False
-        self.network_optimizer = tf.keras.optimizers.Adam()
+        self.network_optimizer = tf.keras.optimizers.Adam(0.01)
         self.discount_factor = discount_factor
         self.buffer = buffer
         self.update_counter = 0
@@ -66,32 +66,35 @@ class Agent:
 
     def create_network(self):
         inputs = keras.Input(shape=(self.state_space,))
-        x = layers.Dense(128, activation='relu')(inputs)
+        x = layers.Dense(512, activation='relu')(inputs)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dense(128, activation='relu')(x)
+        x = layers.BatchNormalization()(x)
         x = layers.Dense(64, activation='relu')(x)
+        x = layers.BatchNormalization()(x)
         x = layers.Dense(32, activation='relu')(x)
+        x = layers.BatchNormalization()(x)
         outputs = layers.Dense(self.action_space)(x)
         return Model(inputs, outputs)
 
     def fit(self, epochs=1):
         if len(self.buffer.buffer) < self.buffer.batch_size:
             return
-
+        states, next_states, _, _, rewards, _ = self.buffer.sample()
+        next_action_values = self.target_network(next_states)
+        td_target = rewards + self.discount_factor * tf.reduce_max(next_action_values, axis=-1)
+        td_target = tf.reshape(td_target, (-1, 1))
         for _ in range(epochs):
-            states, next_states, _, _, rewards, _ = self.buffer.sample()
-            next_action_probs = self.target_network(next_states)
-            td_target = rewards + self.discount_factor * tf.reduce_max(next_action_probs, axis=-1)
-            td_target = tf.reshape(td_target, (-1, 1))
-            self.__train_step(states, rewards, td_target)
-
+            self._train_step(states, rewards, td_target)
         if self.update_counter % 15 == 0:
             self.target_network.set_weights(self.network.get_weights())
 
         self.update_counter += 1
 
-    def __train_step(self, states, rewards, td_target):
+    def _train_step(self, states, rewards, td_target):
         with tf.GradientTape() as tape:
-            action_probs = self.network(states)
-            td_error = self.network_loss(td_target, action_probs)
+            action_values = self.network(states, training=True)
+            td_error = self.network_loss(td_target, action_values)
             grads = tape.gradient(td_error, self.network.trainable_weights)
         
         self.network_optimizer.apply_gradients(zip(grads, self.network.trainable_weights))
@@ -99,14 +102,11 @@ class Agent:
     def policy(self, state):
         if len(state.shape) == 1:
             state = np.expand_dims(state, axis=0)
-        action_probs = np.squeeze(self.network(state))
+        action_values = np.squeeze(self.network(state))
 
-        actions = np.ones(self.action_space, dtype=np.float32) * self.epsilon / self.action_space
-        best_action = np.argmax(action_probs)
-        actions[best_action] += (1.0 - self.epsilon)
-        action = np.random.choice(self.action_space, p=actions)
         
-        return int(action), actions
+        
+        return int(np.argmax(action_values)), action_values
 
 
 class Environment:
@@ -129,9 +129,10 @@ class Environment:
             while True:
                 if self.render_env:
                     self.env.render()
-                action, action_probs = self.agent.policy(state)
+                action, action_values = self.agent.policy(state)
                 next_state, reward, done, _ = self.env.step(action)
-                self.buffer.add_experience((state, next_state, action_probs, action, reward, done))
+                self.buffer.add_experience((state, next_state, action_values, action, reward, done))
+                self.agent.fit(3)
                 t += 1
                 total_reward += reward
                 total_timesteps += t
@@ -139,7 +140,6 @@ class Environment:
                     self.stats['total_rewards'].append(total_reward)
                     self.stats['timesteps_per_episode'].append(total_timesteps)
                     print(f'Episode: {episode}/{self.num_episodes}, Total reward: {total_reward}, Total timesteps: {total_timesteps}')
-                    self.agent.fit(5)
                     break
                 
                 state = next_state
